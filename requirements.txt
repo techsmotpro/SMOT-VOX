@@ -1,0 +1,7 @@
+pipecat-ai
+vosk
+websockets
+pydantic
+python-dotenv
+psycopg2-binary
+httpx
