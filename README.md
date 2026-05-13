@@ -211,7 +211,7 @@ gantt
 
 ```bash
 # Clone the repository
-git clone https://github.com/Manibharadwaj/SMOT-VOX.git
+git clone https://github.com/techsmotpro/SMOT-VOX.git
 cd SMOT-VOX
 
 # Set up Python environment
