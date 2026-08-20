@@ -30,6 +30,16 @@
       "data": "languages.json",
       "valueField": "language_id",
       "errorMessage": "Please select a valid language for text to speech."
+    },
+    {
+      "key": "speak.pace",
+      "label": "Pace",
+      "type": "number",
+      "required": false,
+      "min": 0.5,
+      "max": 2,
+      "step": 0.05,
+      "placeholder": "1.0 (default) - lower is slower"
     }
   ]
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/rapidaai/pkg/commons"
 	"github.com/rapidaai/pkg/utils"
@@ -61,6 +62,7 @@ func (ro *sarvamOption) textToSpeechUrl() string {
 }
 
 func (ro *sarvamOption) configureTextToSpeech() map[string]interface{} {
+	model, _ := ro.modelOpts.GetString("speak.model")
 	configMsg := map[string]interface{}{
 		"type": "config",
 		"data": map[string]interface{}{
@@ -78,7 +80,34 @@ func (ro *sarvamOption) configureTextToSpeech() map[string]interface{} {
 	if speaker, err := ro.modelOpts.GetString("speak.voice.id"); err == nil {
 		configMsg["data"].(map[string]interface{})["speaker"] = speaker
 	}
+	// pace controls speaking rate; 1.0 is the model's natural speed. Sarvam
+	// applies its own default when the field is absent, so only send it when
+	// the assistant has explicitly configured one.
+	if pace, err := ro.modelOpts.GetFloat64("speak.pace"); err == nil {
+		configMsg["data"].(map[string]interface{})["pace"] = clampPace(pace, model)
+	}
 	return configMsg
+}
+
+// paceRange returns the valid pace bounds for a bulbul model. v3 accepts
+// 0.5-2.0, v2 accepts 0.3-3.0; sending a value outside the range makes Sarvam
+// reject the whole config message, which would silence the call.
+func paceRange(model string) (float64, float64) {
+	if strings.HasPrefix(model, "bulbul:v2") {
+		return 0.3, 3.0
+	}
+	return 0.5, 2.0
+}
+
+func clampPace(pace float64, model string) float64 {
+	min, max := paceRange(model)
+	if pace < min {
+		return min
+	}
+	if pace > max {
+		return max
+	}
+	return pace
 }
 
 func (ro *sarvamOption) speechToTextMessage(in []byte) ([]byte, error) {
