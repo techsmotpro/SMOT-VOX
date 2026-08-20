@@ -1,7 +1,43 @@
 [
   {
+    "model_id": "saaras:v4",
+    "name": "saaras:v4 (latest)",
+    "config": {
+      "parameters": [
+        {
+          "key": "listen.language",
+          "label": "Language",
+          "type": "dropdown",
+          "required": true,
+          "default": "en-IN",
+          "data": "languages.json",
+          "valueField": "language_id",
+          "errorMessage": "Please provide valid sarvam language options for speech to text."
+        }
+      ]
+    }
+  },
+  {
+    "model_id": "saaras:v3",
+    "name": "saaras:v3 (recommended)",
+    "config": {
+      "parameters": [
+        {
+          "key": "listen.language",
+          "label": "Language",
+          "type": "dropdown",
+          "required": true,
+          "default": "en-IN",
+          "data": "languages.json",
+          "valueField": "language_id",
+          "errorMessage": "Please provide valid sarvam language options for speech to text."
+        }
+      ]
+    }
+  },
+  {
     "model_id": "saarika:v2.5",
-    "name": "saarika:v2.5",
+    "name": "saarika:v2.5 (legacy)",
     "config": {
       "parameters": [
         {

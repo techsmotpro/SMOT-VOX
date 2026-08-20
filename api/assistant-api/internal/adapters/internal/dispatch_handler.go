@@ -100,7 +100,10 @@ func (h requestorDispatchHandler) HandleSpeechToTextAudio(ctx context.Context, v
 }
 
 func (h requestorDispatchHandler) HandleDenoise(ctx context.Context, vl internal_type.DenoiseAudioPacket) {
-	_ = h.r.denoiserExecutor.Execute(ctx, vl)
+	// nil-guard: same late-packet race as HandleVadAudio during teardown
+	if h.r.denoiserExecutor != nil {
+		_ = h.r.denoiserExecutor.Execute(ctx, vl)
+	}
 }
 
 func (h requestorDispatchHandler) HandleDenoisedAudio(ctx context.Context, vl internal_type.DenoisedAudioPacket) {
@@ -115,7 +118,11 @@ func (h requestorDispatchHandler) HandleDenoisedAudio(ctx context.Context, vl in
 }
 
 func (h requestorDispatchHandler) HandleVadAudio(ctx context.Context, vl internal_type.VadAudioPacket) {
-	_ = h.r.vadExecutor.Execute(ctx, internal_type.UserAudioReceivedPacket{ContextID: vl.ContextID, Audio: vl.Audio})
+	// nil-guard: late audio packets can arrive after the VAD executor is torn down
+	// during finalization; without this the call panics (SIGSEGV) post-disconnect.
+	if h.r.vadExecutor != nil {
+		_ = h.r.vadExecutor.Execute(ctx, internal_type.UserAudioReceivedPacket{ContextID: vl.ContextID, Audio: vl.Audio})
+	}
 }
 func (h requestorDispatchHandler) HandleVadSpeechActivity(ctx context.Context, vl internal_type.VadSpeechActivityPacket) {
 	if h.r.endOfSpeechExecutor != nil {
@@ -3066,6 +3073,11 @@ func (h requestorDispatchHandler) HandleFinalizeArtifactPushExecutor(ctx context
 
 func (h requestorDispatchHandler) HandleExecuteAnalysis(ctx context.Context, p internal_type.ExecuteAnalysisPacket) {
 	if h.r.assistantAnalyseExecutors != nil {
+		// Detach post-call analysis from the session's 30s disconnect deadline;
+		// LLM analysis over a full transcript legitimately takes longer.
+		analysisCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+		defer cancel()
+		ctx = analysisCtx
 		source := variable.NewCommunicationSource(h.r)
 		registry := internal_namespace.NewDefaultRegistry().With("event", &internal_namespace.EventNamespace{})
 		for _, initializedAnalysis := range h.r.assistantAnalyseExecutors {

@@ -9,6 +9,7 @@ package internal_exotel_telephony
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,154 @@ import (
 	"github.com/rapidaai/protos"
 )
 
+// MaxSessionDuration is the hard ceiling on an Exotel call leg. Exotel exposes
+// no REST hangup (the Legs API is a paid add-on that returns 401 unless enabled
+// on the account), so closing the WebSocket is the only way to release a leg.
+// That path works — Exotel drops the leg within ~2s — but it only runs when
+// something decides to end the call. If the model never emits end_conversation
+// and the caller never hangs up, nothing stops the call. This is that backstop.
+const MaxSessionDuration = 10 * time.Minute
+
+// Drain tuning for server-initiated hangups. Closing the WebSocket releases the
+// Exotel leg immediately, cutting off any assistant audio still queued for
+// playout — a goodbye line gets truncated mid-word. drainOutput waits for the
+// pacer to stop emitting real audio before the close, capped so a stuck TTS
+// stream can never hold a leg (and its billing) open.
+const (
+	// DrainTimeout is deliberately short: releasing the leg promptly matters
+	// more than delivering every last syllable, and a long grace period keeps a
+	// call (and its billing) alive whenever TTS stalls. A farewell that needs
+	// longer than this gets clipped — an accepted trade for a bounded hangup.
+	DrainTimeout      = 10 * time.Second
+	drainPollInterval = 100 * time.Millisecond
+	// drainQuietPolls is how many consecutive flat-ActiveTicks polls count as
+	// "finished speaking". 3 * 100ms tolerates normal inter-frame jitter
+	// without adding audible dead air before the hangup.
+	drainQuietPolls = 3
+)
+
+// ClosingHangupDelay is the pause between the assistant finishing a farewell
+// and the leg being released. The model is unreliable about emitting
+// end_conversation in the same turn as its closing line -- it routinely waits
+// for another user turn that never comes -- so the transport ends the call
+// itself once it hears a closing.
+const ClosingHangupDelay = 5 * time.Second
+
+// ClosingTailGrace covers audio that has left the pacer but has not reached the
+// caller yet: the websocket write, Exotel's own buffering and the carrier's
+// jitter buffer. drainOutput only knows that the last frame was *sent*, so
+// closing the moment it goes quiet clips the final word ("Goodbye" arriving as
+// "good"). This grace is additive to the drain, not a replacement for it.
+const ClosingTailGrace = 1200 * time.Millisecond
+
+// closingMarkers are phrases that only appear when the assistant is signing
+// off. A turn containing a question is never treated as a closing: the
+// assistant is still expecting an answer, and hanging up would cut the caller
+// off mid-thought.
+var closingMarkers = []string{
+	"thank you",
+	"thanks for your time",
+	"goodbye",
+	"good bye",
+	"have a good",
+	"have a nice",
+	"take care",
+	"call you back",
+}
+
+func isClosingLine(text string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(text))
+	if trimmed == "" || strings.Contains(trimmed, "?") {
+		return false
+	}
+	for _, marker := range closingMarkers {
+		if strings.Contains(trimmed, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteAssistantText accumulates streamed text for the current assistant turn.
+// Any new speech also disarms a pending hangup: the assistant is talking again,
+// so whatever looked like a farewell was not the end of the call.
+func (exotel *exotelWebsocketStreamer) noteAssistantText(chunk string) {
+	exotel.closingMu.Lock()
+	defer exotel.closingMu.Unlock()
+	if exotel.closingTimer != nil {
+		exotel.closingTimer.Stop()
+		exotel.closingTimer = nil
+	}
+	exotel.turnText.WriteString(chunk)
+}
+
+// cancelClosingHangup disarms a pending hangup and clears the turn buffer. Used
+// when the caller interrupts: they are still on the line and still talking.
+func (exotel *exotelWebsocketStreamer) cancelClosingHangup() {
+	exotel.closingMu.Lock()
+	defer exotel.closingMu.Unlock()
+	if exotel.closingTimer != nil {
+		exotel.closingTimer.Stop()
+		exotel.closingTimer = nil
+	}
+	exotel.turnText.Reset()
+}
+
+// requestClosingHangup records that the model asked to end the call. The
+// hangup itself waits for the current turn to finish speaking.
+func (exotel *exotelWebsocketStreamer) requestClosingHangup() {
+	exotel.closingMu.Lock()
+	exotel.endRequested = true
+	exotel.closingMu.Unlock()
+}
+
+// armClosingHangup runs when an assistant turn finishes speaking. If that turn
+// was a farewell, the leg is released after ClosingHangupDelay unless the
+// caller speaks or the assistant starts a new turn first.
+func (exotel *exotelWebsocketStreamer) armClosingHangup() {
+	exotel.closingMu.Lock()
+	spoken := exotel.turnText.String()
+	exotel.turnText.Reset()
+	requested := exotel.endRequested
+	exotel.endRequested = false
+	if !requested && !isClosingLine(spoken) {
+		exotel.closingMu.Unlock()
+		return
+	}
+	if exotel.closingTimer != nil {
+		exotel.closingTimer.Stop()
+	}
+	exotel.closingTimer = time.AfterFunc(ClosingHangupDelay, func() {
+		if exotel.closed.Load() {
+			return
+		}
+		_ = exotel.Record(observability.RecordEvent{
+			Component: observability.ComponentCall,
+			Event:     observability.CallHangup,
+			Attributes: observability.Attributes{
+				"component":         observability.ComponentCall.String(),
+				"provider":          internal_exotel.Provider,
+				"stream_id":         exotel.streamID,
+				"conversation_uuid": exotel.ChannelUUID,
+				"reason":            "closing_line_hangup",
+			},
+		}, observability.RecordMetadata{
+			Metadata: []*protos.Metadata{
+				{Key: observability.MetadataCallStatus, Value: "completed"},
+				{Key: observability.MetadataDisconnectReason, Value: "closing_line_hangup"},
+			},
+		})
+		exotel.drainOutput()
+		// Let the tail reach the caller before the leg is released.
+		select {
+		case <-exotel.Ctx.Done():
+		case <-time.After(ClosingTailGrace):
+		}
+		_ = exotel.Cancel()
+	})
+	exotel.closingMu.Unlock()
+}
+
 type exotelWebsocketStreamer struct {
 	internal_telephony_base.BaseTelephonyStreamer
 	mediaSession *internal_telephony_media.MediaSession
@@ -31,6 +180,14 @@ type exotelWebsocketStreamer struct {
 	writeMu      sync.Mutex
 	closed       atomic.Bool
 	streamID     string
+
+	// Closing-line hangup state. turnText accumulates the assistant's streamed
+	// text for the current turn; closingTimer is armed once that turn finishes
+	// speaking and its text reads as a farewell.
+	closingMu    sync.Mutex
+	turnText     strings.Builder
+	closingTimer *time.Timer
+	endRequested bool
 }
 
 type StreamerOptions struct {
@@ -101,7 +258,90 @@ func New(opts ...FuncOption) (internal_type.Streamer, error) {
 		Record:     exotel.Record,
 	})
 	go exotel.runWebSocketReader()
+	go exotel.runSessionWatchdog()
 	return exotel, nil
+}
+
+// drainOutput blocks until the assistant has finished speaking or DrainTimeout
+// elapses, so a server-initiated hangup does not truncate queued audio.
+// ActiveTicks advances only on frames carrying real audio; once it stops moving
+// the pacer is emitting silence and the leg is safe to release.
+func (exotel *exotelWebsocketStreamer) drainOutput() {
+	if exotel.mediaSession == nil || exotel.closed.Load() {
+		return
+	}
+	deadline := time.NewTimer(DrainTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+
+	lastActive := exotel.mediaSession.OutputHealthSnapshot().ActiveTicks
+	quiet := 0
+	for {
+		select {
+		case <-exotel.Ctx.Done():
+			return
+		case <-deadline.C:
+			_ = exotel.Record(observability.RecordLog{
+				Level:   observability.LevelDebug,
+				Message: "Exotel drain timed out with audio still pending",
+				Attributes: observability.Attributes{
+					"component":         observability.ComponentCall.String(),
+					"provider":          internal_exotel.Provider,
+					"stream_id":         exotel.streamID,
+					"conversation_uuid": exotel.ChannelUUID,
+					"drain_timeout":     DrainTimeout.String(),
+				},
+			})
+			return
+		case <-ticker.C:
+			active := exotel.mediaSession.OutputHealthSnapshot().ActiveTicks
+			if active != lastActive {
+				lastActive = active
+				quiet = 0
+				continue
+			}
+			if quiet++; quiet >= drainQuietPolls {
+				return
+			}
+		}
+	}
+}
+
+// runSessionWatchdog force-ends the call if it outlives MaxSessionDuration.
+// Exits quietly when the call ends normally — Ctx is cancelled by Cancel().
+func (exotel *exotelWebsocketStreamer) runSessionWatchdog() {
+	timer := time.NewTimer(MaxSessionDuration)
+	defer timer.Stop()
+
+	select {
+	case <-exotel.Ctx.Done():
+		return
+	case <-timer.C:
+		if exotel.closed.Load() {
+			return
+		}
+		_ = exotel.Record(observability.RecordEvent{
+			Component: observability.ComponentCall,
+			Event:     observability.CallHangup,
+			Attributes: observability.Attributes{
+				"component":         observability.ComponentCall.String(),
+				"provider":          internal_exotel.Provider,
+				"stream_id":         exotel.streamID,
+				"conversation_uuid": exotel.ChannelUUID,
+				"reason":            "max_session_duration_exceeded",
+				"max_duration":      MaxSessionDuration.String(),
+			},
+		}, observability.RecordMetadata{
+			Metadata: []*protos.Metadata{
+				{Key: observability.MetadataCallStatus, Value: "completed"},
+				{Key: observability.MetadataDisconnectReason, Value: "max_session_duration_exceeded"},
+			},
+		})
+		_ = exotel.Disconnect(protos.ConversationDisconnection_DISCONNECTION_TYPE_MAX_DURATION)
+		exotel.stopAudioProcessing()
+		_ = exotel.Cancel()
+	}
 }
 
 func (exotel *exotelWebsocketStreamer) runWebSocketReader() {
@@ -313,6 +553,13 @@ func (exotel *exotelWebsocketStreamer) Send(response internal_type.Stream) error
 			exotel.mediaSession.HandleInitialization(data)
 		}
 	case *protos.ConversationAssistantMessage:
+		// End of turn arrives as a bare Completed message with no Audio and no
+		// Text payload, so it has to be handled before the payload switch --
+		// inside it, the nil Message matches no case and the turn looks like it
+		// never ended.
+		if data.GetCompleted() {
+			exotel.armClosingHangup()
+		}
 		switch content := data.Message.(type) {
 		case *protos.ConversationAssistantMessage_Audio:
 			if exotel.mediaSession == nil {
@@ -322,9 +569,13 @@ func (exotel *exotelWebsocketStreamer) Send(response internal_type.Stream) error
 				return err
 			}
 			return nil
+		case *protos.ConversationAssistantMessage_Text:
+			exotel.noteAssistantText(content.Text)
+			return nil
 		}
 	case *protos.ConversationInterruption:
 		if data.Type == protos.ConversationInterruption_INTERRUPTION_TYPE_WORD {
+			exotel.cancelClosingHangup()
 			if exotel.mediaSession != nil {
 				exotel.mediaSession.HandleInterrupt()
 			}
@@ -334,6 +585,16 @@ func (exotel *exotelWebsocketStreamer) Send(response internal_type.Stream) error
 		// (it called Notify with it). No need to round-trip back through
 		// CriticalCh — Exotel has no REST API to terminate a call; closing
 		// the WebSocket via Cancel is the only way to release the call leg.
+		//
+		// Let any in-flight speech finish first. Skipped when the caller is
+		// already gone (USER) or the session is broken (ERROR) — nobody is
+		// listening, so waiting would only keep a dead leg billing.
+		switch data.GetType() {
+		case protos.ConversationDisconnection_DISCONNECTION_TYPE_USER,
+			protos.ConversationDisconnection_DISCONNECTION_TYPE_ERROR:
+		default:
+			exotel.drainOutput()
+		}
 		_ = exotel.Disconnect(data.GetType())
 		_ = exotel.Record(observability.RecordEvent{
 			Component: observability.ComponentCall,
@@ -393,6 +654,13 @@ func (exotel *exotelWebsocketStreamer) Send(response internal_type.Stream) error
 				Action: data.GetAction(),
 				Result: map[string]string{"status": "completed"},
 			})
+			// Do NOT hang up here. The model emits this tool alongside the text
+			// of its closing line, before TTS has produced a single frame --
+			// draining now sees a pacer that has not started yet, reads it as
+			// "finished speaking", and cuts the farewell off mid-word. Record
+			// the intent and let the end-of-turn handler release the leg once
+			// the audio has actually played.
+			exotel.requestClosingHangup()
 		case protos.ToolCallAction_TOOL_CALL_ACTION_TRANSFER_CONVERSATION:
 			// Exotel transfer is NOT supported. Exotel exposes call-flow level
 			// "Connect" applets but no live mid-call transfer API on the

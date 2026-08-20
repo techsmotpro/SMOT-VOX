@@ -6,7 +6,7 @@
       "label": "Model",
       "type": "dropdown",
       "required": true,
-      "default": "saarika:v2.5",
+      "default": "saaras:v4",
       "data": "speech-to-text-models.json",
       "valueField": "model_id",
       "errorMessage": "Please provide valid sarvam model for speech to text."

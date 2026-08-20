@@ -144,6 +144,17 @@ func (mediaSession *MediaSession) hasMediaEngine() bool {
 	return mediaSession.mediaEngine != nil
 }
 
+// OutputHealthSnapshot exposes the current output pacer counters. Transports
+// use ActiveTicks to tell whether the assistant is still speaking: it only
+// advances on frames carrying real audio, so a flat ActiveTicks means playout
+// has finished and the leg can be released without truncating speech.
+func (mediaSession *MediaSession) OutputHealthSnapshot() internal_output.HealthSnapshot {
+	if mediaSession == nil || mediaSession.mediaEngine == nil {
+		return internal_output.HealthSnapshot{}
+	}
+	return mediaSession.mediaEngine.OutputHealthSnapshot()
+}
+
 func (mediaSession *MediaSession) runOutputHealthReporter(mediaEngine MediaEngine) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"github.com/rapidaai/api/assistant-api/internal/observability"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -317,6 +318,16 @@ func (rt *sarvamTextToSpeech) Transform(ctx context.Context, in internal_type.Pa
 		return nil
 
 	case internal_type.TextToSpeechTextPacket:
+		// A turn that produced only a tool call carries no speakable text.
+		// Sarvam rejects those with 400 "'text' cannot be empty", so drop them
+		// here rather than surfacing a spurious TTS error. Matches the guard
+		// the other TTS transformers already apply.
+		// TrimSpace, not == "": a turn that carries only a tool call often
+		// still holds whitespace (a stray newline from the model), which slips
+		// past an equality check and trips Sarvam's 400 anyway.
+		if strings.TrimSpace(input.Text) == "" {
+			return nil
+		}
 		// Fallback reconnect: handles Initialize() failure during interrupt or
 		// an unintentional connection drop between turns.
 		if connection == nil {

@@ -15,3 +15,7 @@ license-check-and-add.json
 
 .codex
 .claude
+
+# local backups, not for git
+*.bak-*
+*.bak-before-*

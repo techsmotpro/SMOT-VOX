@@ -1,9 +1,9 @@
 {
     "connection": {
-        "assistant": "http://localhost:8080",
-        "web": "http://localhost:8080",
-        "endpoint": "http://localhost:8080",
-        "media": "http://localhost:8080",
+        "assistant": "https://voicebot.smothub.in",
+        "web": "https://voicebot.smothub.in",
+        "endpoint": "https://voicebot.smothub.in",
+        "media": "https://voicebot.smothub.in",
         "socket": "localhost:4573",
         "sip": "localhost:5060"
     },

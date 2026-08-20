@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	internal_type "github.com/rapidaai/api/assistant-api/internal/type"
 	"github.com/rapidaai/pkg/commons"
@@ -51,10 +52,31 @@ var sentenceBoundaries = []string{
 	"۔", // Arabic full stop
 }
 
+// clauseBoundaries defines mid-sentence punctuation. Waiting for a full
+// sentence before speaking anything costs roughly a second of dead air on a
+// phone call, since nothing reaches TTS until the closing period arrives.
+// Splitting at clauses lets audio start while the model is still generating.
+//
+// These are "soft" boundaries: unlike sentenceBoundaries they only split once
+// the pending chunk is at least minClauseRunes long, so short fragments like
+// "Yes," are not sent to TTS on their own (which would sound clipped).
+var clauseBoundaries = []string{
+	",", "—", "–", // Latin comma and dashes
+	"，", "、", // CJK comma / enumeration comma
+	"،", // Arabic comma
+}
+
 const (
 	// emitBufferPrealloc is the initial capacity for the per-call emit buffer,
 	// sized to avoid reallocation in the common case of a few sentences.
 	emitBufferPrealloc = 8
+
+	// minClauseRunes is the smallest chunk worth emitting at a clause boundary.
+	// Measured in runes, not bytes, so Devanagari and CJK text is not held back
+	// by its larger UTF-8 encoding. Tuned so a typical opening clause ("Sure,
+	// I can help you with that,") flushes while shorter interjections wait for
+	// more text to accumulate.
+	minClauseRunes = 25
 )
 
 // ============================================================================
@@ -86,6 +108,10 @@ type textAggregator struct {
 	// followed by optional trailing whitespace.
 	boundaryRegex *regexp.Regexp
 
+	// clauseRegex matches mid-sentence punctuation. Splits here are subject to
+	// the minClauseRunes threshold; see clauseBoundaries.
+	clauseRegex *regexp.Regexp
+
 	// toEmitBuffer is a reusable slice that collects packets to emit during
 	// a single Aggregate call, reducing per-call heap allocations.
 	toEmitBuffer []internal_type.Packet
@@ -99,7 +125,11 @@ type textAggregator struct {
 //
 // Returns an error if the boundary regex compilation fails.
 func NewLLMTextAggregator(_ context.Context, logger commons.Logger, onPacket func(context.Context, ...internal_type.Packet) error) (internal_type.LLMTextAggregator, error) {
-	regex, err := compileBoundaryRegex()
+	regex, err := compileBoundaryRegex(sentenceBoundaries)
+	if err != nil {
+		return nil, err
+	}
+	clauseRegex, err := compileBoundaryRegex(clauseBoundaries)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +138,7 @@ func NewLLMTextAggregator(_ context.Context, logger commons.Logger, onPacket fun
 		onPacket:      onPacket,
 		toEmitBuffer:  make([]internal_type.Packet, 0, emitBufferPrealloc),
 		boundaryRegex: regex,
+		clauseRegex:   clauseRegex,
 	}, nil
 }
 
@@ -115,9 +146,9 @@ func NewLLMTextAggregator(_ context.Context, logger commons.Logger, onPacket fun
 // character. Whitespace after the boundary is intentionally NOT consumed
 // so that it is preserved as a leading space in the next emitted chunk,
 // preventing TTS engines from merging words across sentence boundaries.
-func compileBoundaryRegex() (*regexp.Regexp, error) {
-	parts := make([]string, len(sentenceBoundaries))
-	for i, b := range sentenceBoundaries {
+func compileBoundaryRegex(boundaries []string) (*regexp.Regexp, error) {
+	parts := make([]string, len(boundaries))
+	for i, b := range boundaries {
 		parts[i] = regexp.QuoteMeta(b)
 	}
 
@@ -258,14 +289,18 @@ func (st *textAggregator) handleDoneLocked(done internal_type.LLMResponseDonePac
 func (st *textAggregator) extractSentencesAtBoundaryLocked(contextID string) {
 	text := st.buffer.String()
 
-	matches := st.boundaryRegex.FindAllStringIndex(text, -1)
-	if len(matches) == 0 {
-		return
+	// Sentence boundaries always split. Clause boundaries only split once the
+	// leading chunk is long enough to be worth speaking on its own, so audio
+	// starts sooner without fragmenting short replies.
+	lastBoundaryEnd := 0
+	if matches := st.boundaryRegex.FindAllStringIndex(text, -1); len(matches) > 0 {
+		lastBoundaryEnd = matches[len(matches)-1][1]
 	}
-
-	// The last match end position is the split point between complete and
-	// incomplete text.
-	lastBoundaryEnd := matches[len(matches)-1][1]
+	for _, match := range st.clauseRegex.FindAllStringIndex(text, -1) {
+		if match[1] > lastBoundaryEnd && utf8.RuneCountInString(text[:match[1]]) >= minClauseRunes {
+			lastBoundaryEnd = match[1]
+		}
+	}
 	if lastBoundaryEnd == 0 {
 		return
 	}

@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	internal_assistant_entity "github.com/rapidaai/api/assistant-api/internal/entity/assistants"
@@ -173,7 +175,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, input internal_type.Analy
 	}
 
 	var parsed map[string]interface{}
-	if err := json.Unmarshal([]byte(response.GetData()[0]), &parsed); err != nil {
+	raw := sanitizeAnalysisJSON(response.GetData()[0])
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		e.logger.Warnf("analysis endpoint: response not parseable even after sanitize, storing raw: %v", err)
 		parsed = map[string]interface{}{"result": response.GetData()[0]}
 	}
 
@@ -191,4 +195,24 @@ func (e *runtimeExecutor) Execute(ctx context.Context, input internal_type.Analy
 func (e *runtimeExecutor) Close(_ context.Context) error {
 	e.caller = nil
 	return nil
+}
+
+var (
+	analysisCodeFence    = regexp.MustCompile("(?s)```(?:json)?\\s*([\\s\\S]*?)```")
+	analysisFirstJSONObj = regexp.MustCompile(`(?s)\{[\s\S]*\}`)
+)
+
+// sanitizeAnalysisJSON strips markdown code fences and any text outside the
+// first JSON object, so only parseable JSON reaches json.Unmarshal. Some LLMs
+// (e.g. glm-5.2) wrap output in ```json fences despite prompt instructions;
+// this keeps analysis metadata clean regardless of model behavior.
+func sanitizeAnalysisJSON(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if m := analysisCodeFence.FindStringSubmatch(trimmed); m != nil {
+		trimmed = strings.TrimSpace(m[1])
+	}
+	if loc := analysisFirstJSONObj.FindStringIndex(trimmed); loc != nil {
+		trimmed = trimmed[loc[0]:loc[1]]
+	}
+	return trimmed
 }

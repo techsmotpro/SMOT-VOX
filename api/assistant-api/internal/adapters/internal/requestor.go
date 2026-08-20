@@ -52,7 +52,13 @@ const (
 	dbWriteTimeout     = 5 * time.Second
 	recordingTimeout   = 3*storages.FileWriteTimeout + dbWriteTimeout
 	connectDeadline    = 30 * time.Second
-	disconnectDeadline = 30 * time.Second
+	// Post-call analysis (an LLM pass over the full transcript) must finish
+	// inside this finalize window or its result is lost when the session is
+	// force-cancelled. Raised from the original 30s, which was too tight.
+	// 45s leaves ~6x headroom over observed analysis times (3.5-7.6s on
+	// sarvam-105b) while keeping a stuck session from hanging around: a longer
+	// window widens the teardown race that HandleVadAudio guards against.
+	disconnectDeadline = 45 * time.Second
 )
 
 var (

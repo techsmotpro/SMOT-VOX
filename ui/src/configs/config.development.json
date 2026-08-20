@@ -3,7 +3,7 @@
         "assistant": "http://localhost:8080",
         "web": "http://localhost:8080",
         "endpoint": "http://localhost:8080",
-        "media": "https://integral-presently-cub.ngrok-free.app",
+        "media": "https://voicebot.smothub.in",
         "socket": "localhost:4573",
         "sip": "localhost:5060"
     },

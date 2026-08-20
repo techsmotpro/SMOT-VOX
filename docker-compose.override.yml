@@ -1,0 +1,62 @@
+# Security override: bind all published ports to localhost only.
+# External traffic must come through Caddy (443 -> nginx :8080).
+#
+# Data paths are also pinned here. docker-compose.yml interpolates ${HOME}, so
+# running compose as root silently re-points postgres at an empty cluster in
+# /root/rapida-data and every database looks wiped (this happened 2026-08-12).
+# The absolute paths below make the stack behave identically for any user.
+# !override replaces the whole volumes list, so each service repeats its
+# non-data mounts from docker-compose.yml.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:5432:5432"
+    volumes: !override
+      - /home/devuser/rapida-data/assets/db:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+  redis:
+    ports: !override
+      - "127.0.0.1:6379:6379"
+    volumes: !override
+      - /home/devuser/rapida-data/assets/redis:/data
+  nginx:
+    ports: !override
+      - "127.0.0.1:8080:8080"
+    volumes: !override
+      - ./docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ui_build:/usr/share/nginx/html:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+      - /home/devuser/rapida-data/assets:/app/rapida-data/assets
+  ui:
+    ports: !override
+      - "127.0.0.1:3000:3000"
+  web-api:
+    ports: !override
+      - "127.0.0.1:9001:9001"
+    volumes: !override
+      - ./docker/web-api/web.yml:/opt/apps/env/web.yml:ro
+      - /home/devuser/rapida-data/assets:/app/rapida-data/assets
+      - go-mod-cache:/go/pkg/mod
+  assistant-api:
+    ports: !override
+      - "127.0.0.1:9007:9007"
+      - "127.0.0.1:4573:4573"
+      - "127.0.0.1:5090:5090/udp"
+    volumes: !override
+      - ./docker/assistant-api/assistant.yml:/opt/apps/env/assistant.yml:ro
+      - /home/devuser/rapida-data/assets:/app/rapida-data/assets
+      - go-mod-cache:/go/pkg/mod
+  integration-api:
+    ports: !override
+      - "127.0.0.1:9004:9004"
+    volumes: !override
+      - ./docker/integration-api/integration.yml:/opt/apps/env/integration.yml:ro
+      - /home/devuser/rapida-data/assets:/app/rapida-data/assets
+      - go-mod-cache:/go/pkg/mod
+  endpoint-api:
+    ports: !override
+      - "127.0.0.1:9005:9005"
+    volumes: !override
+      - ./docker/endpoint-api/endpoint.yml:/opt/apps/env/endpoint.yml:ro
+      - /home/devuser/rapida-data/assets:/app/rapida-data/assets
+      - go-mod-cache:/go/pkg/mod

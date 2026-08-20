@@ -169,7 +169,7 @@ func (exo *exotelTelephony) ClientUrl(vaultCredential *protos.VaultCredential, o
 	if sid == "" || cid == "" || token == "" {
 		return nil, internal_exotel.ErrVaultCredentialInvalid
 	}
-	return utils.Ptr(fmt.Sprintf("https://%s:%s@api.exotel.com/v1/Accounts/%s/Calls/connect.json",
+	return utils.Ptr(fmt.Sprintf("https://%s:%s@api.in.exotel.com/v1/Accounts/%s/Calls/connect.json",
 		cid, token, sid)), nil
 }
 
@@ -190,7 +190,7 @@ func (exo *exotelTelephony) AppUrl(vaultCredential *protos.VaultCredential, opts
 	if sid == "" {
 		return nil, internal_exotel.ErrVaultAccountSIDInvalid
 	}
-	return utils.Ptr(fmt.Sprintf("http://my.exotel.com/%s/exoml/start_voice/%s", sid, app_id)), nil
+	return utils.Ptr(fmt.Sprintf("http://my.in.exotel.com/%s/exoml/start_voice/%s", sid, app_id)), nil
 }
 
 func (exo *exotelTelephony) OutboundCall(

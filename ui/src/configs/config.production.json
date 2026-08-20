@@ -3,7 +3,7 @@
         "assistant": "https://assistant-01.in.rapida.ai",
         "web": "https://api-01.in.rapida.ai",
         "endpoint": "https://api-01.in.rapida.ai",
-        "media": "https://websocket-01.in.rapida.ai",
+        "media": "https://voicebot.smothub.in",
         "socket": "socket-01.in.rapida.ai:4573",
         "sip": "sip-01.in.rapida.ai:5060"
     },

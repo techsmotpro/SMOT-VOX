@@ -751,3 +751,51 @@ func TestRealisticLLMStream_CafeConversation(t *testing.T) {
 		t.Errorf("reconstructed text mismatch:\n got: %q\nwant: %q", fullText, expected)
 	}
 }
+
+// TestClauseBoundaryEmitsEarly verifies that a long opening clause is sent to
+// TTS before the sentence terminator arrives. Waiting for the final period is
+// what made replies feel roughly a second late on phone calls.
+func TestClauseBoundaryEmitsEarly(t *testing.T) {
+	logger, _ := commons.NewApplicationLogger()
+	onPacket, collect := newCollector()
+	aggregator, _ := NewLLMTextAggregator(t.Context(), logger, onPacket)
+	defer aggregator.Close()
+
+	// No sentence terminator anywhere in this delta.
+	if err := aggregator.Aggregate(context.Background(), internal_type.LLMResponseDeltaPacket{
+		ContextID: "speaker1",
+		Text:      "Sure, I can help you with that, let me check",
+	}); err != nil {
+		t.Fatalf("Aggregate failed: %v", err)
+	}
+
+	results := collect()
+	if len(results) != 1 {
+		t.Fatalf("expected 1 early clause emit, got %d", len(results))
+	}
+	ts := results[0].(internal_type.TextToSpeechTextPacket)
+	// Splits at the LAST qualifying clause boundary, retaining the tail.
+	if ts.Text != "Sure, I can help you with that," {
+		t.Errorf("unexpected clause chunk: %q", ts.Text)
+	}
+}
+
+// TestShortClauseWaits verifies the minClauseRunes gate: a brief interjection
+// must not be shipped to TTS on its own, which would sound clipped.
+func TestShortClauseWaits(t *testing.T) {
+	logger, _ := commons.NewApplicationLogger()
+	onPacket, collect := newCollector()
+	aggregator, _ := NewLLMTextAggregator(t.Context(), logger, onPacket)
+	defer aggregator.Close()
+
+	if err := aggregator.Aggregate(context.Background(), internal_type.LLMResponseDeltaPacket{
+		ContextID: "speaker1",
+		Text:      "Yes, ok",
+	}); err != nil {
+		t.Fatalf("Aggregate failed: %v", err)
+	}
+
+	if results := collect(); len(results) != 0 {
+		t.Fatalf("expected short clause to stay buffered, got %d packets", len(results))
+	}
+}
