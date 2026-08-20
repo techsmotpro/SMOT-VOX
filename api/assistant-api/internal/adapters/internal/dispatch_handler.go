@@ -249,8 +249,17 @@ func (h requestorDispatchHandler) HandleInterruptionDetected(ctx context.Context
 			internal_type.StopIdleTimeoutPacket{ContextID: p.ContextID},
 			internal_type.EndOfSpeechInterruptionPacket{ContextID: p.ContextID, Source: internal_type.InterruptionSourceWord},
 		)
+		// A second interrupt inside a turn that is already Interrupted fails
+		// this transition by design (already interrupted). The stop packets
+		// and the notify below must still run: the caller is talking over
+		// audio that is already queued, and returning here leaves that audio
+		// playing with no remaining way to stop it -- both sides then keep
+		// trying to take the turn and neither succeeds. All three side effects
+		// are idempotent (cancel a timer, clear a buffer, stop a stream), so
+		// repeating them is safe; skipping them is not.
 		if err := h.r.Transition(Interrupted); err != nil {
-			return
+			h.r.logger.Debugw("interrupt transition rejected; issuing stop anyway",
+				"error", err, "context_id", p.ContextID)
 		}
 		h.r.OnPacket(ctx,
 			internal_type.TextToSpeechInterruptPacket{ContextID: p.ContextID, StartAt: p.StartAt, EndAt: p.EndAt},
